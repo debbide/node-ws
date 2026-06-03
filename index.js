@@ -680,15 +680,28 @@ class NezhaSystemMonitor {
 
   async collectHost() {
     const cpus = os.cpus() || [];
-    const [memInfo, fsInfo] = await Promise.all([
+    const [memInfo, fsInfo, osInfo, cpuInfo] = await Promise.all([
       si.mem().catch(() => null),
-      si.fsSize().catch(() => [])
+      si.fsSize().catch(() => []),
+      si.osInfo().catch(() => null),
+      si.cpu().catch(() => null)
     ]);
     const diskTotal = Array.isArray(fsInfo) ? fsInfo.reduce((sum, item) => sum + safeUInt(item.size), 0) : 0;
+    
+    let pName = os.platform() || process.platform;
+    let pVer = os.release() || '';
+    if (osInfo && osInfo.distro) {
+        pName = (osInfo.distro === 'unknown' ? pName : osInfo.distro);
+        pVer = (osInfo.release === 'unknown' ? pVer : osInfo.release);
+    }
+    
+    let cpuModel = cpus.length ? (cpus[0].model || os.arch()) : os.arch();
+    if (cpuInfo && cpuInfo.brand) cpuModel = cpuInfo.brand;
+
     return {
-      platform: os.platform() || process.platform,
-      platform_version: os.release() || '',
-      cpu: cpus.length ? [cpus[0].model || os.arch()] : [os.arch()],
+      platform: pName,
+      platform_version: pVer,
+      cpu: [cpuModel],
       mem_total: safeUInt(memInfo ? memInfo.total : os.totalmem()),
       disk_total: safeUInt(diskTotal),
       swap_total: safeUInt(memInfo ? memInfo.swaptotal : 0),
@@ -1257,6 +1270,7 @@ class EmbeddedNezhaClient {
   }
 
   async runOnce() {
+    this.lastGeoQueryIp = '';
     this.client = await this.newChannel();
     await this.waitForReady(15000);
     await this.reportHost();
