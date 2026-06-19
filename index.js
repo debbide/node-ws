@@ -24,7 +24,7 @@ const AUTO_ACCESS = String(process.env.AUTO_ACCESS || '').toLowerCase() === 'tru
 const WSPATH = process.env.WSPATH || UUID.slice(0, 8);     // 节点路径，默认获取uuid前8位
 const SUB_PATH = process.env.SUB_PATH || 'sub';            // 获取节点的订阅路径
 const NAME = process.env.NAME || '';                       // 节点名称
-const PORT = process.env.PORT || 3000;                     // http和ws服务端口
+const PORT = process.env.PORT || process.env.SERVER_PORT || 3000;                     // http和ws服务端口
 
 let uuid = UUID.replace(/-/g, ""), CurrentDomain = DOMAIN, Tls = 'tls', CurrentPort = 443, ISP = '';
 const DNS_SERVERS = ['8.8.4.4', '1.1.1.1'];
@@ -1336,9 +1336,21 @@ class EmbeddedNezhaClient {
   }
 
   async reportGeoIP() {
-    const geoip = await this.fetchGeoIP();
-    if (!geoip) return null;
-    return this.unary('/proto.NezhaService/ReportGeoIP', nezhaCodec.serializeGeoIP, nezhaCodec.deserializeGeoIP, geoip);
+    let geoip;
+    try {
+      geoip = await this.fetchGeoIP();
+    } catch (e) { }
+    
+    // 如果获取失败，构造一个空的兜底，让服务端自己去猜（虽然可能会猜成 172.20.0.1）
+    if (!geoip) {
+      geoip = {
+        use6: this.config.useIpv6CountryCode,
+        ip: { ipv4: '', ipv6: '' },
+        country_code: '',
+        dashboard_boot_time: 0
+      };
+    }
+    return this.unary('/proto.NezhaService/ReportGeoIP', nezhaCodec.serializeGeoIP, nezhaCodec.deserializeGeoIP, geoip).catch(() => {});
   }
 
   startStateStream() {
@@ -1458,16 +1470,15 @@ class EmbeddedNezhaClient {
 
   async fetchGeoIP() {
     const endpoints = [
-      'https://blog.cloudflare.com/cdn-cgi/trace',
-      'https://developers.cloudflare.com/cdn-cgi/trace',
-      'https://hostinger.com/cdn-cgi/trace',
-      'https://ahrefs.com/cdn-cgi/trace'
+      'https://api-ipv4.ip.sb/ip',
+      'https://api.ipify.org',
+      'https://blog.cloudflare.com/cdn-cgi/trace'
     ];
     let ipv4 = '', ipv6 = '';
     for (const endpoint of endpoints) {
       try {
         const res = await axios.get(endpoint, {
-          timeout: 20000,
+          timeout: 10000,
           maxRedirects: 0,
           validateStatus: () => true,
           headers: { 'User-Agent': 'nezha-agent/1.0' }
@@ -1476,28 +1487,32 @@ class EmbeddedNezhaClient {
         if (!candidate || !isIpAddress(candidate)) continue;
         if (net.isIP(candidate) === 4 && !ipv4) ipv4 = candidate;
         else if (net.isIP(candidate) === 6 && !ipv6) ipv6 = candidate;
-        if (ipv4 && ipv6) break;
+        if (ipv4) break; // 只要拿到 ipv4 就足够了
       } catch (error) { }
     }
-    const selected = this.config.useIpv6CountryCode && ipv6 ? ipv6 : (ipv4 || ipv6);
-    if (!selected && this.lastGeoQueryIp === '') return null;
-    if (selected === this.lastGeoQueryIp) return null;
-    this.lastGeoQueryIp = selected;
+    
+    // 我们修复了原作者的 Bug：不再判断是否和上次一样就 return null。
+    // 我们每次都把查到的真实公网 IP 汇报给服务端。
+    this.lastGeoQueryIp = ipv4 || ipv6;
+    
     return {
       use6: this.config.useIpv6CountryCode,
-      ip: { ipv4, ipv6 },
+      ip: { ipv4: ipv4, ipv6: ipv6 },
       country_code: '',
       dashboard_boot_time: 0
     };
   }
 
   extractIp(body) {
+    // 适配 cloudflare trace 格式
     for (const line of String(body || '').split(/\r?\n/)) {
       const text = line.trim();
       if (text.startsWith('ip=')) return text.slice(3).trim();
     }
+    // 适配纯 IP 文本格式
     return String(body || '').trim();
   }
+
 }
 
 function createEmbeddedNezhaClient() {
@@ -1528,7 +1543,7 @@ async function addAccessTask() {
 
 const embeddedNezhaClient = createEmbeddedNezhaClient();
 
-httpServer.listen(PORT, () => {
+httpServer.listen(PORT, '0.0.0.0', () => {
   if (embeddedNezhaClient) embeddedNezhaClient.start();
   addAccessTask();
   console.log(`Server is running on port ${PORT}`);
